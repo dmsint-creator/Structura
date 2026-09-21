@@ -1,0 +1,3 @@
+import { primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
+export const appState = sqliteTable("app_state", { userId:text("user_id").notNull(), scope:text("scope").notNull(), payload:text("payload").notNull(), updatedAt:text("updated_at").notNull() }, table=>[primaryKey({columns:[table.userId,table.scope]})]);
+export const storedDocuments = sqliteTable("stored_documents", { id:text("id").primaryKey(), userId:text("user_id").notNull(), objectKey:text("object_key").notNull(), filename:text("filename").notNull(), contentType:text("content_type").notNull(), size:text("size").notNull(), createdAt:text("created_at").notNull() });
