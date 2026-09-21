@@ -44,3 +44,6 @@ next-env.d.ts
 # dependencies and generated build output
 /node_modules/
 /build/
+
+# Allow safe environment variable template
+!.env.example
