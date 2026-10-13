@@ -30,13 +30,14 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  "exclude": [
+ "exclude": [
   "node_modules",
   "examples",
   "worker",
   "dist",
   "build",
   ".wrangler",
-  ".sites-runtime"
+  ".sites-runtime",
+  "vite.config.ts"
 ]
 }
