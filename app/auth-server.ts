@@ -1,92 +1,130 @@
-import { env } from "cloudflare:workers";
 import { NextRequest } from "next/server";
-const DB = () => (env as any).DB;
-const enc = new TextEncoder();
-const hex = (b: ArrayBuffer) =>
-  Array.from(new Uint8Array(b))
-    .map((x) => x.toString(16).padStart(2, "0"))
-    .join("");
-export async function hashPassword(password: string, salt: string) {
-  const key = await crypto.subtle.importKey(
-      "raw",
-      enc.encode(password),
-      "PBKDF2",
-      false,
-      ["deriveBits"],
-    ),
-    bits = await crypto.subtle.deriveBits(
-      {
-        name: "PBKDF2",
-        hash: "SHA-256",
-        salt: enc.encode(salt),
-        iterations: 100000,
-      },
-      key,
-      256,
+import { createServerClient } from "@supabase/ssr";
+
+export type StructuraRole =
+  | "Master Admin"
+  | "Admin Assistant"
+  | "Viewer";
+
+export type StructuraAccountType = "admin" | "client";
+
+export type StructuraSession = {
+  id: string;
+  name: string;
+  email: string;
+  role: StructuraRole;
+  account_type: StructuraAccountType;
+  status: string;
+  must_change: boolean;
+  organization_id: string;
+};
+
+function createRequestSupabaseClient(request: NextRequest) {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+
+  if (!supabaseUrl || !supabaseKey) {
+    throw new Error(
+      "Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
     );
-  return hex(bits);
+  }
+
+  return createServerClient(supabaseUrl, supabaseKey, {
+    cookies: {
+      getAll() {
+        return request.cookies.getAll();
+      },
+      setAll() {
+        // Session cookie writes are handled by the auth route.
+      },
+    },
+  });
 }
-export async function ensureAuth() {
-  await DB()
-    .prepare(
-      "CREATE TABLE IF NOT EXISTS structura_users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, salt TEXT NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, must_change INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
-    )
-    .run();
-  await DB()
-    .prepare(
-      "CREATE TABLE IF NOT EXISTS structura_sessions (token TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)",
-    )
-    .run();
-  await DB()
-    .prepare(
-      "CREATE TABLE IF NOT EXISTS structura_access_log (id TEXT PRIMARY KEY, user_email TEXT, action TEXT NOT NULL, detail TEXT, created_at TEXT NOT NULL)",
-    )
-    .run();
-}
-export async function logAccess(email: string, action: string, detail = "") {
-  await ensureAuth();
-  await DB()
-    .prepare(
-      "INSERT INTO structura_access_log (id,user_email,action,detail,created_at) VALUES (?,?,?,?,?)",
-    )
-    .bind(crypto.randomUUID(), email, action, detail, new Date().toISOString())
-    .run();
-}
-export async function getSession(request: NextRequest) {
-  await ensureAuth();
-  const token = request.cookies.get("structura_session")?.value;
-  if (!token) return null;
-  const row = await DB()
-    .prepare(
-      "SELECT u.id,u.name,u.email,u.role,u.status,u.must_change,s.expires_at FROM structura_sessions s JOIN structura_users u ON u.id=s.user_id WHERE s.token=?",
-    )
-    .bind(token)
-    .first();
-  if (
-    !row ||
-    row.status !== "Active" ||
-    new Date(row.expires_at) < new Date()
-  ) {
-    if (token)
-      await DB()
-        .prepare("DELETE FROM structura_sessions WHERE token=?")
-        .bind(token)
-        .run();
+
+export async function getSession(
+  request: NextRequest,
+): Promise<StructuraSession | null> {
+  const supabase = createRequestSupabaseClient(request);
+
+  const {
+    data: { user },
+    error,
+  } = await supabase.auth.getUser();
+
+  if (error || !user) return null;
+
+  const { data: profile, error: profileError } = await supabase
+    .from("profiles")
+    .select("name, status, must_change_password, account_type")
+    .eq("id", user.id)
+    .single();
+
+  if (profileError || !profile || profile.status !== "Active") {
     return null;
   }
-  return row as {
-    id: string;
-    name: string;
-    email: string;
-    role: string;
-    status: string;
-    must_change: number;
-    expires_at: string;
+
+  if (profile.account_type !== "admin" && profile.account_type !== "client") {
+    return null;
+  }
+
+  const { data: membership, error: membershipError } = await supabase
+    .from("organization_members")
+    .select("organization_id, role, status")
+    .eq("user_id", user.id)
+    .eq("status", "Active")
+    .limit(1)
+    .single();
+
+  if (membershipError || !membership) {
+    return null;
+  }
+
+  return {
+    id: user.id,
+    name: profile.name,
+    email: user.email ?? "",
+    role: membership.role as StructuraRole,
+    account_type: profile.account_type as StructuraAccountType,
+    status: profile.status,
+    must_change: profile.must_change_password,
+    organization_id: membership.organization_id,
   };
 }
-export function randomPassword() {
-  const chars =
+
+export async function logAccess(
+  request: NextRequest,
+  action: string,
+  detail = "",
+) {
+  const session = await getSession(request);
+
+  if (!session) return;
+
+  const supabase = createRequestSupabaseClient(request);
+
+  const { error } = await supabase
+    .from("structura_access_log")
+    .insert({
+      organization_id: session.organization_id,
+      user_id: session.id,
+      user_email: session.email,
+      action,
+      detail,
+    });
+
+  if (error) {
+    console.error("Failed to write Structura access log:", error.message);
+  }
+}
+
+export function randomPassword(length = 14) {
+  const alphabet =
     "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%";
-  const bytes = crypto.getRandomValues(new Uint8Array(14));
-  return Array.from(bytes, (b) => chars[b % chars.length]).join("");
+
+  const bytes = crypto.getRandomValues(new Uint8Array(length));
+
+  return Array.from(
+    bytes,
+    (byte) => alphabet[byte % alphabet.length],
+  ).join("");
 }

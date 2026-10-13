@@ -248,6 +248,7 @@ export default function Home() {
     name: string;
     email: string;
     role: UserRole;
+    accountType: "admin" | "client";
     mustChange: boolean;
   };
   const [section, setSection] = useState<Section>("dashboard"),
@@ -264,9 +265,23 @@ export default function Home() {
     [loginForm, setLoginForm] = useState({ email: "", password: "" }),
     [loginError, setLoginError] = useState(""),
     [loginBusy, setLoginBusy] = useState(false),
+    [authMode, setAuthMode] = useState<"login" | "register">("login"),
+    [registerForm, setRegisterForm] = useState({
+  organizationName: "",
+  name: "",
+  email: "",
+  password: "",
+  confirmPassword: "",
+}),
+[registerError, setRegisterError] = useState(""),
+[registerBusy, setRegisterBusy] = useState(false),
+[registerSuccess, setRegisterSuccess] = useState(""),
     [newPassword, setNewPassword] = useState(""),
     [backupVersions, setBackupVersions] = useState<any[]>([]),
-    [backupsBusy, setBackupsBusy] = useState(false);
+    [backupsBusy, setBackupsBusy] = useState(false),
+    [subscriptionModalOpen, setSubscriptionModalOpen] = useState(false),
+    [subscriptionCheckBusy, setSubscriptionCheckBusy] = useState(false),
+    [subscriptionCheckError, setSubscriptionCheckError] = useState("");
   const [ready, setReady] = useState(false),
     [registryLoaded, setRegistryLoaded] = useState(false),
     [search, setSearch] = useState(""),
@@ -325,41 +340,25 @@ export default function Home() {
   }, []);
   useEffect(() => {
     if (!session) return;
+
+    // Tenant isolation: never carry registry state from a previous session.
+    setReady(false);
+    setRegistryLoaded(false);
+    setEntities([]);
+    setHolders([]);
+    setOwnerships([]);
+    setOfficers([]);
+    setBranches([]);
+    setDocuments([]);
+    setAudit([]);
+    setUsers([]);
+    setBackupVersions([]);
+
     (async () => {
       try {
         const response = await fetch("/api/state?scope=registry"),
           cloud = await response.json();
-        let d = cloud.data;
-        try {
-          const browserRegistries = findBrowserRegistries();
-          const sources = [...browserRegistries, ...(d ? [d] : [])];
-          if (sources.some((source) => source?.entities?.length)) {
-            const merged = mergeRegistrySources(sources);
-            const cloudCount = [
-              "entities",
-              "holders",
-              "ownerships",
-              "officers",
-              "branches",
-              "documents",
-              "audit",
-            ].reduce((sum, key) => sum + (cloud.data?.[key]?.length || 0), 0);
-            const mergedCount = Object.values(merged).reduce(
-              (sum, rows) => sum + rows.length,
-              0,
-            );
-            d = { ...merged, users: cloud.data?.users || [] };
-            if (mergedCount > cloudCount) {
-              const migrated = await fetch("/api/state?scope=registry", {
-                method: "PUT",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify(d),
-              });
-              if (!migrated.ok)
-                throw new Error("Registry recovery merge was rejected.");
-            }
-          }
-        } catch {}
+        const d = cloud.data;
         if (d) {
           setEntities(d.entities || []);
           setHolders(d.holders || []);
@@ -427,13 +426,6 @@ export default function Home() {
       audit,
       users,
     };
-    if (entities.length > 0)
-      try {
-        localStorage.setItem(
-          "structura-emergency-backup-v2",
-          JSON.stringify({ ...data, savedAt: new Date().toISOString() }),
-        );
-      } catch {}
     const timer = setTimeout(
       () =>
         fetch("/api/state?scope=registry", {
@@ -550,7 +542,47 @@ export default function Home() {
       setUf({ name: "", email: "", role: "Viewer", status: "Active" });
     setModal(kind);
   };
-  function saveEntity() {
+  async function requireActiveSubscription() {
+    if (!session) return false;
+
+    // DMS/platform admin accounts never require a paid subscription.
+    if (session.accountType === "admin") return true;
+
+    setSubscriptionCheckBusy(true);
+    setSubscriptionCheckError("");
+
+    try {
+      const response = await fetch("/api/subscription", {
+        cache: "no-store",
+      });
+
+      const result = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        setSubscriptionCheckError(
+          result.error || "Unable to check your subscription. Please try again.",
+        );
+        setSubscriptionModalOpen(true);
+        return false;
+      }
+
+      if (result.entitled) return true;
+
+      setSubscriptionModalOpen(true);
+      return false;
+    } catch {
+      setSubscriptionCheckError(
+        "Unable to check your subscription. Please try again.",
+      );
+      setSubscriptionModalOpen(true);
+      return false;
+    } finally {
+      setSubscriptionCheckBusy(false);
+    }
+  }
+
+  async function saveEntity() {
+    if (!(await requireActiveSubscription())) return;
     if (!ef.name.trim()) return;
     if (editId) {
       setEntities((v) => v.map((e) => (e.id === editId ? { ...e, ...ef } : e)));
@@ -561,7 +593,8 @@ export default function Home() {
     }
     setModal(null);
   }
-  function saveOwnership() {
+  async function saveOwnership() {
+    if (!(await requireActiveSubscription())) return;
     if (!of.holder.trim() || !of.entityId) return;
     const currentOwnership = editId
         ? ownerships.find((ownership) => ownership.id === editId)
@@ -600,7 +633,8 @@ export default function Home() {
     );
     setModal(null);
   }
-  function saveBranch() {
+  async function saveBranch() {
+    if (!(await requireActiveSubscription())) return;
     if (!bf.name.trim() || !bf.entityId) return;
     const row = { ...bf };
     if (editId)
@@ -614,7 +648,8 @@ export default function Home() {
     );
     setModal(null);
   }
-  function saveOfficer() {
+  async function saveOfficer() {
+    if (!(await requireActiveSubscription())) return;
     if (!gf.name.trim()) return;
     const row = { ...gf };
     if (editId)
@@ -630,6 +665,7 @@ export default function Home() {
   }
   async function saveUser() {
     if (!isMaster || !uf.name.trim() || !uf.email.trim()) return;
+    if (!(await requireActiveSubscription())) return;
     if (
       users.some(
         (u) =>
@@ -666,6 +702,7 @@ export default function Home() {
     setModal(null);
   }
   async function resetUserPassword(u: AppUser) {
+    if (!(await requireActiveSubscription())) return;
     const r = await fetch("/api/auth", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -681,6 +718,7 @@ export default function Home() {
     );
   }
   async function saveDocument() {
+    if (!(await requireActiveSubscription())) return;
     const selected = df.file || docRef.current?.files?.[0] || null;
     if (!df.name.trim() || !selected) return;
     const body = new FormData();
@@ -754,8 +792,9 @@ export default function Home() {
     setUf({ name: u.name, email: u.email, role: u.role, status: u.status });
     setModal("user");
   }
-  function remove(kind: string, id: string, label: string) {
+  async function remove(kind: string, id: string, label: string) {
     if (!canDelete) return;
+    if (!(await requireActiveSubscription())) return;
     if (kind === "entity") {
       setEntities((v) => v.filter((x) => x.id !== id));
       setOwnerships((v) => v.filter((x) => x.entityId !== id));
@@ -930,7 +969,11 @@ export default function Home() {
     );
     XLSX.writeFile(wb, "Structura_Import_Template.xlsx");
   }
-  function importExcel(file: File) {
+  async function importExcel(file: File) {
+    if (!(await requireActiveSubscription())) {
+      if (importRef.current) importRef.current.value = "";
+      return;
+    }
     const r = new FileReader();
     r.onload = () => {
       try {
@@ -1087,6 +1130,104 @@ export default function Home() {
       setLoginBusy(false);
     }
   }
+  async function register() {
+  setRegisterError("");
+  setRegisterSuccess("");
+
+  const organizationName =
+    registerForm.organizationName.trim();
+  const name = registerForm.name.trim();
+  const email = registerForm.email.trim();
+
+  if (
+    !organizationName ||
+    !name ||
+    !email ||
+    !registerForm.password ||
+    !registerForm.confirmPassword
+  ) {
+    setRegisterError(
+      "Please complete all required fields.",
+    );
+    return;
+  }
+
+  if (registerForm.password.length < 10) {
+    setRegisterError(
+      "Password must contain at least 10 characters.",
+    );
+    return;
+  }
+
+  if (
+    registerForm.password !==
+    registerForm.confirmPassword
+  ) {
+    setRegisterError(
+      "The passwords do not match.",
+    );
+    return;
+  }
+
+  setRegisterBusy(true);
+
+  try {
+    const r = await fetch("/api/auth", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        action: "register",
+        organizationName,
+        name,
+        email,
+        password: registerForm.password,
+      }),
+    });
+
+    const text = await r.text();
+
+    let d: any = {};
+
+    try {
+      d = JSON.parse(text);
+    } catch {}
+
+    if (!r.ok) {
+      setRegisterError(
+        d.error ||
+          "Unable to create your organisation account.",
+      );
+      return;
+    }
+
+    setRegisterSuccess(
+      "Your organisation account has been created. You can now sign in.",
+    );
+
+    setLoginForm({
+      email,
+      password: "",
+    });
+
+    setRegisterForm({
+      organizationName: "",
+      name: "",
+      email: "",
+      password: "",
+      confirmPassword: "",
+    });
+
+    setAuthMode("login");
+  } catch {
+    setRegisterError(
+      "Unable to connect. Please check your internet connection and try again.",
+    );
+  } finally {
+    setRegisterBusy(false);
+  }
+}
   async function logout() {
     await fetch("/api/auth", {
       method: "POST",
@@ -1097,7 +1238,14 @@ export default function Home() {
     setReady(false);
     setRegistryLoaded(false);
     setEntities([]);
+    setHolders([]);
+    setOwnerships([]);
+    setOfficers([]);
+    setBranches([]);
+    setDocuments([]);
+    setAudit([]);
     setUsers([]);
+    setBackupVersions([]);
   }
   async function changePassword() {
     const r = await fetch("/api/auth", {
@@ -1117,6 +1265,7 @@ export default function Home() {
     setNewPassword("");
   }
   async function restoreLatest() {
+    if (!(await requireActiveSubscription())) return;
     if (
       !confirm(
         "Restore the latest automatic backup? Current registry data will be replaced.",
@@ -1151,6 +1300,7 @@ export default function Home() {
     setBackupsBusy(false);
   }
   async function restoreVersion(version: any) {
+    if (!(await requireActiveSubscription())) return;
     if (!confirm(`Restore the registry saved on ${new Date(version.createdAt).toLocaleString()}?\n\nThe current registry will be backed up first.`)) return;
     const response = await fetch("/api/state", {
         method: "POST",
@@ -1182,6 +1332,17 @@ export default function Home() {
         error={loginError}
         login={login}
         busy={loginBusy}
+        authMode={authMode}
+        setAuthMode={setAuthMode}
+        registerForm={registerForm}
+        setRegisterForm={setRegisterForm}
+        register={register}
+        registerError={registerError}
+        setRegisterError={setRegisterError}
+        registerBusy={registerBusy}
+        registerSuccess={registerSuccess}
+        setRegisterSuccess={setRegisterSuccess}
+        setLoginError={setLoginError}
       />
     );
   if (session.mustChange)
@@ -1965,6 +2126,62 @@ export default function Home() {
         ownerships={ownerships}
         branches={branches}
       />
+
+      <Dialog
+        open={subscriptionModalOpen}
+        onOpenChange={setSubscriptionModalOpen}
+      >
+        <DialogContent className="sm:max-w-[520px]">
+          <DialogHeader>
+            <DialogTitle>Structura Subscription</DialogTitle>
+            <DialogDescription>
+              Your organisation needs an active subscription before changes can
+              be saved.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="rounded-xl border bg-slate-50 p-5">
+            <div className="text-sm font-semibold text-slate-500">
+              STRUCTURA MONTHLY
+            </div>
+            <div className="mt-2 flex items-end gap-2">
+              <strong className="text-4xl">RM150</strong>
+              <span className="pb-1 text-sm text-slate-500">/ month</span>
+            </div>
+            <div className="mt-4 space-y-2 text-sm text-slate-700">
+              <div>✓ Full corporate registry management</div>
+              <div>✓ Entities, ownership and governance</div>
+              <div>✓ Documents and reporting</div>
+              <div>✓ Organisation user management</div>
+            </div>
+          </div>
+
+          {subscriptionCheckError ? (
+            <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              {subscriptionCheckError}
+            </div>
+          ) : null}
+
+          <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setSubscriptionModalOpen(false)}
+            >
+              Not now
+            </Button>
+            <Button
+              type="button"
+              disabled={subscriptionCheckBusy}
+              onClick={() => {
+                location.href = "/subscribe";
+              }}
+            >
+              {subscriptionCheckBusy ? "Checking…" : "Subscribe with PayPal"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </main>
   );
 }
@@ -2701,59 +2918,278 @@ function Select({
   );
 }
 
-function LoginScreen({ form, setForm, error, login, busy }: any) {
-  return (
+function LoginScreen({
+  form,
+  setForm,
+  error,
+  login,
+  busy,
+  authMode,
+  setAuthMode,
+  registerForm,
+  setRegisterForm,
+  register,
+  registerError,
+  setRegisterError,
+  registerBusy,
+  registerSuccess,
+  setRegisterSuccess,
+  setLoginError,
+}: any) {
+  const showRegister = authMode === "register";
+ return (
     <main className="auth-screen">
       <section className="auth-card">
         <div className="auth-brand">
           <i>
             <GitFork />
           </i>
+
           <div>
             <h1>Structura</h1>
             <p>Corporate Registry</p>
           </div>
         </div>
-        <h2>Welcome back</h2>
-        <p>
-          Sign in to access your corporate structure, ownership and organisation
-          records.
-        </p>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            login();
-          }}
-        >
-          <F label="Email address">
-            <Input
-              type="email"
-              autoComplete="username"
-              value={form.email}
-              onChange={(e) => setForm({ ...form, email: e.target.value })}
-            />
-          </F>
-          <F label="Password">
-            <Input
-              type="password"
-              autoComplete="current-password"
-              value={form.password}
-              onChange={(e) => setForm({ ...form, password: e.target.value })}
-            />
-          </F>
-          {error && <div className="auth-error">{error}</div>}
-          <button className="auth-submit" type="submit" disabled={busy}>
-            {busy ? "Signing in…" : "Sign in securely"}
-          </button>
-        </form>
-        <small>Protected cloud access · Structura</small>
+
+        {showRegister ? (
+          <>
+            <h2>Create your organisation</h2>
+
+            <p>
+              Create a secure Structura workspace for
+              your organisation.
+            </p>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                register();
+              }}
+            >
+              <F label="Organisation name">
+                <Input
+                  autoComplete="organization"
+                  value={
+                    registerForm.organizationName
+                  }
+                  onChange={(e) =>
+                    setRegisterForm({
+                      ...registerForm,
+                      organizationName:
+                        e.target.value,
+                    })
+                  }
+                />
+              </F>
+
+              <F label="Your full name">
+                <Input
+                  autoComplete="name"
+                  value={registerForm.name}
+                  onChange={(e) =>
+                    setRegisterForm({
+                      ...registerForm,
+                      name: e.target.value,
+                    })
+                  }
+                />
+              </F>
+
+              <F label="Email address">
+                <Input
+                  type="email"
+                  autoComplete="email"
+                  value={registerForm.email}
+                  onChange={(e) =>
+                    setRegisterForm({
+                      ...registerForm,
+                      email: e.target.value,
+                    })
+                  }
+                />
+              </F>
+
+              <F label="Password">
+                <Input
+                  type="password"
+                  autoComplete="new-password"
+                  value={registerForm.password}
+                  onChange={(e) =>
+                    setRegisterForm({
+                      ...registerForm,
+                      password: e.target.value,
+                    })
+                  }
+                />
+              </F>
+
+              <F label="Confirm password">
+                <Input
+                  type="password"
+                  autoComplete="new-password"
+                  value={
+                    registerForm.confirmPassword
+                  }
+                  onChange={(e) =>
+                    setRegisterForm({
+                      ...registerForm,
+                      confirmPassword:
+                        e.target.value,
+                    })
+                  }
+                />
+              </F>
+
+              {registerError && (
+                <div className="auth-error">
+                  {registerError}
+                </div>
+              )}
+
+              <button
+                className="auth-submit"
+                type="submit"
+                disabled={registerBusy}
+              >
+                {registerBusy
+                  ? "Creating organisation…"
+                  : "Create organisation"}
+              </button>
+            </form>
+
+            <small>
+              Already have an account?{" "}
+              <button
+                type="button"
+                onClick={() => {
+                  setRegisterError("");
+                  setAuthMode("login");
+                }}
+                style={{
+                  border: 0,
+                  padding: 0,
+                  background: "transparent",
+                  cursor: "pointer",
+                  textDecoration: "underline",
+                  font: "inherit",
+                }}
+              >
+                Sign in
+              </button>
+            </small>
+          </>
+        ) : (
+          <>
+            <h2>Welcome back</h2>
+
+            <p>
+              Sign in to access your corporate
+              structure, ownership and organisation
+              records.
+            </p>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                login();
+              }}
+            >
+              <F label="Email address">
+                <Input
+                  type="email"
+                  autoComplete="username"
+                  value={form.email}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      email: e.target.value,
+                    })
+                  }
+                />
+              </F>
+
+              <F label="Password">
+                <Input
+                  type="password"
+                  autoComplete="current-password"
+                  value={form.password}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      password: e.target.value,
+                    })
+                  }
+                />
+              </F>
+
+              {error && (
+                <div className="auth-error">
+                  {error}
+                </div>
+              )}
+
+              {registerSuccess && (
+                <div
+                  style={{
+                    marginBottom: 12,
+                    padding: 10,
+                    borderRadius: 6,
+                    fontSize: 13,
+                  }}
+                >
+                  {registerSuccess}
+                </div>
+              )}
+
+              <button
+                className="auth-submit"
+                type="submit"
+                disabled={busy}
+              >
+                {busy
+                  ? "Signing in…"
+                  : "Sign in securely"}
+              </button>
+            </form>
+
+            <small>
+              New to Structura?{" "}
+              <button
+                type="button"
+                onClick={() => {
+                  setLoginError("");
+                  setRegisterSuccess("");
+                  setAuthMode("register");
+                }}
+                style={{
+                  border: 0,
+                  padding: 0,
+                  background: "transparent",
+                  cursor: "pointer",
+                  textDecoration: "underline",
+                  font: "inherit",
+                }}
+              >
+                Create organisation account
+              </button>
+            </small>
+          </>
+        )}
+
+        <small>
+          Protected cloud access · Structura
+        </small>
+
         <small className="auth-copyright">
-          © {new Date().getFullYear()} DMS INTELLIGENT SOLUTIONS SDN BHD. All rights reserved.
+          © {new Date().getFullYear()} DMS
+          INTELLIGENT SOLUTIONS SDN BHD. All rights
+          reserved.
         </small>
       </section>
     </main>
   );
 }
+
 function PasswordChange({
   name,
   password,
@@ -2774,11 +3210,13 @@ function PasswordChange({
             <p>First sign-in</p>
           </div>
         </div>
-        <h2>Hello, {name}</h2>
+
+        <h2>Choose a new password</h2>
         <p>
-          Create a private password with at least 10 characters before entering
+          Welcome {name}. Replace your temporary password before continuing to
           Structura.
         </p>
+
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -2793,14 +3231,36 @@ function PasswordChange({
               onChange={(e) => setPassword(e.target.value)}
             />
           </F>
+
           {error && <div className="auth-error">{error}</div>}
-          <Button type="submit">Save password and continue</Button>
-          <Button type="button" variant="outline" onClick={logout}>
-            Log out
-          </Button>
+
+          <button className="auth-submit" type="submit">
+            Save new password
+          </button>
         </form>
+
+        <small>Use at least 10 characters.</small>
+
+        <small>
+          <button
+            type="button"
+            onClick={logout}
+            style={{
+              border: 0,
+              padding: 0,
+              background: "transparent",
+              cursor: "pointer",
+              textDecoration: "underline",
+              font: "inherit",
+            }}
+          >
+            Sign out
+          </button>
+        </small>
+
         <small className="auth-copyright">
-          © {new Date().getFullYear()} DMS INTELLIGENT SOLUTIONS SDN BHD. All rights reserved.
+          © {new Date().getFullYear()} DMS INTELLIGENT SOLUTIONS SDN BHD. All
+          rights reserved.
         </small>
       </section>
     </main>
